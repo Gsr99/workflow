@@ -3,6 +3,25 @@
 //  Single-file, export default FlowHub
 // ─────────────────────────────────────────────────────────────────────────────
 import { useState, useEffect, useRef, useContext, createContext, useCallback } from "react"
+import { initializeApp, getApps } from "firebase/app"
+import { getAuth, GoogleAuthProvider, signInWithPopup } from "firebase/auth"
+
+// ── Firebase Setup ────────────────────────────────────────────────────────────
+// Replace these values with your own from Firebase Console →
+// Project Settings → Your apps → SDK setup and configuration
+const FIREBASE_CONFIG = {
+   apiKey: "AIzaSyCnCoTJEo9SN0Zszw7aAfdhzPH2uNCy93A",
+    authDomain: "team-dashboard-grg.firebaseapp.com",
+    databaseURL: "https://team-dashboard-grg-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "team-dashboard-grg",
+    storageBucket: "team-dashboard-grg.firebasestorage.app",
+    messagingSenderId: "433901758957",
+    appId: "1:433901758957:web:f29973298cf5a9a8891fe4",
+    measurementId: "G-9598T4Y6LB"
+}
+const firebaseApp  = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG)
+const firebaseAuth = getAuth(firebaseApp)
+const googleProvider = new GoogleAuthProvider()
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 const DARK = {
@@ -228,6 +247,7 @@ function Login({ members, onLogin, dark, setDark }) {
   const [newPwFlow, setNewPwFlow] = useState(null)
   const [np1, setNp1]             = useState('')
   const [np2, setNp2]             = useState('')
+  const [ssoLoading, setSsoLoading] = useState(false)
 
   const doLogin = () => {
     const m = members.find(x => x.email === email.trim())
@@ -243,9 +263,29 @@ function Login({ members, onLogin, dark, setDark }) {
     onLogin(newPwFlow, np1)
   }
 
-  const googleSSO = () => {
-    const m = members.find(x => x.role === 'admin') || members[0]
-    onLogin(m)
+  const googleSSO = async () => {
+    setErr('')
+    setSsoLoading(true)
+    try {
+      const result = await signInWithPopup(firebaseAuth, googleProvider)
+      const googleEmail = result.user.email
+      const m = members.find(x => x.email.toLowerCase() === googleEmail.toLowerCase())
+      if (m) {
+        onLogin(m)
+      } else {
+        setErr(`No FlowHub account found for ${googleEmail}. Ask your admin to add you.`)
+      }
+    } catch (e) {
+      if (e.code === 'auth/popup-closed-by-user') {
+        setErr('Sign-in cancelled.')
+      } else if (e.code === 'auth/unauthorized-domain') {
+        setErr('This domain is not authorized. Add it in Firebase Console → Authentication → Settings → Authorized domains.')
+      } else {
+        setErr('Google sign-in failed: ' + e.message)
+      }
+    } finally {
+      setSsoLoading(false)
+    }
   }
 
   if (newPwFlow) return (
@@ -289,8 +329,8 @@ function Login({ members, onLogin, dark, setDark }) {
         <button onClick={doLogin} style={{...BT(T.acc), width:'100%', padding:'11px', marginBottom:10, fontSize:14}}>
           Sign In
         </button>
-        <button onClick={googleSSO} style={{...GH(T), width:'100%', padding:'11px', display:'flex', alignItems:'center', justifyContent:'center', gap:8, fontSize:14}}>
-          <span>🔑</span> Continue with Google (SSO)
+        <button onClick={googleSSO} disabled={ssoLoading} style={{...GH(T), width:'100%', padding:'11px', display:'flex', alignItems:'center', justifyContent:'center', gap:8, fontSize:14, opacity: ssoLoading ? 0.6 : 1, cursor: ssoLoading ? 'wait' : 'pointer'}}>
+          <span>🔑</span> {ssoLoading ? 'Signing in...' : 'Continue with Google (SSO)'}
         </button>
         <div style={{marginTop:20, textAlign:'center'}}>
           <button onClick={()=>setDark(!dark)} style={{background:'none', border:'none', color:T.t2, cursor:'pointer', fontSize:13, display:'inline-flex', alignItems:'center', gap:6}}>
@@ -1695,206 +1735,112 @@ function App() {
   const [files,    setFiles]    = useState([])
   const [page,     setPage]     = useState('overview')
   const [onlineTime, setOnlineTime] = useState(0)
-  const [breakTime, setBreakTime]   = useState(0)
-  const [onBreak, setOnBreak]       = useState(false)
-  const [activeTimer, setActiveTimer] = useState('online')
+  const [onBreak, setOnBreak]   = useState(false)
   const timerRef = useRef(null)
-  const stateRef = useRef({})
 
-  // ── Persist via window.storage / localStorage fallback ────────────────────
-  const readRaw = useCallback(async key => {
-    try {
-      if (typeof window === 'undefined') return null
-      if (window.storage?.get) {
-        const r = await window.storage.get(key, true)
-        return r?.value ?? null
-      }
-      return window.localStorage?.getItem(key) ?? null
-    } catch {
-      return null
-    }
-  }, [])
-
-  const writeRaw = useCallback(async (key, raw) => {
-    try {
-      if (typeof window === 'undefined') return
-      if (window.storage?.set) {
-        await window.storage.set(key, raw, true)
-        return
-      }
-      window.localStorage?.setItem(key, raw)
-    } catch {}
-  }, [])
-
+  // ── Persist via window.storage ─────────────────────────────────────────────
   const tryGet = useCallback(async key => {
-    const raw = await readRaw(key)
-    if (!raw) return null
-    try { return JSON.parse(raw) } catch { return null }
-  }, [readRaw])
-
+    try {
+      const r = await window.storage?.get(key, true)
+      return r?.value ? JSON.parse(r.value) : null
+    } catch { return null }
+  }, [])
   const trySet = useCallback(async (key, val) => {
-    await writeRaw(key, JSON.stringify(val))
-  }, [writeRaw])
+    try { await window.storage?.set(key, JSON.stringify(val), true) } catch {}
+  }, [])
 
-  const hydrateFromStorage = useCallback(async () => {
-    const [m,t,msg,meet,proj,n,f,d] = await Promise.all([
-      tryGet('fh3_members'),
-      tryGet('fh3_tasks'),
-      tryGet('fh3_messages'),
-      tryGet('fh3_meetings'),
-      tryGet('fh3_projects'),
-      tryGet('fh3_notes'),
-      tryGet('fh3_files'),
-      tryGet('fh3_dark'),
-    ])
+  useEffect(()=>{
+    (async()=>{
+      const [m,t,msg,meet,proj,n,f,d] = await Promise.all([
+        tryGet('fh3_members'), tryGet('fh3_tasks'),    tryGet('fh3_messages'),
+        tryGet('fh3_meetings'), tryGet('fh3_projects'), tryGet('fh3_notes'),
+        tryGet('fh3_files'),   tryGet('fh3_dark')
+      ])
+      if (m)            setMembers(m)
+      if (t)            setTasks(t)
+      if (msg)          setMessages(msg)
+      if (meet)         setMeetings(meet)
+      if (proj)         setProjects(proj)
+      if (n)            setNotes(n)
+      if (f)            setFiles(f)
+      if (d !== null && d !== undefined) setDark(d)
+    })()
+  }, [])
 
-    const cur = stateRef.current
-    const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
-
-    if (m && !eq(m, cur.members)) setMembers(m)
-    if (t && !eq(t, cur.tasks)) setTasks(t)
-    if (msg && !eq(msg, cur.messages)) setMessages(msg)
-    if (meet && !eq(meet, cur.meetings)) setMeetings(meet)
-    if (proj && !eq(proj, cur.projects)) setProjects(proj)
-    if (n && !eq(n, cur.notes)) setNotes(n)
-    if (f && !eq(f, cur.files)) setFiles(f)
-    if (d !== null && d !== undefined && d !== cur.dark) setDark(d)
-  }, [tryGet])
-
-  useEffect(() => {
-    stateRef.current = { members, tasks, messages, meetings, projects, notes, files, dark }
-  }, [members, tasks, messages, meetings, projects, notes, files, dark])
-
-  useEffect(() => {
-    hydrateFromStorage()
-  }, [hydrateFromStorage])
-
-  useEffect(() => { trySet('fh3_members', members)   }, [members, trySet])
-  useEffect(() => { trySet('fh3_tasks', tasks)       }, [tasks, trySet])
-  useEffect(() => { trySet('fh3_messages', messages) }, [messages, trySet])
-  useEffect(() => { trySet('fh3_meetings', meetings) }, [meetings, trySet])
-  useEffect(() => { trySet('fh3_projects', projects) }, [projects, trySet])
-  useEffect(() => { trySet('fh3_notes', notes)       }, [notes, trySet])
-  useEffect(() => { trySet('fh3_files', files)       }, [files, trySet])
-  useEffect(() => { trySet('fh3_dark', dark)         }, [dark, trySet])
-
-  // ── Shared storage sync ────────────────────────────────────────────────────
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-
-    const onStorage = e => {
-      if (!e.key || !String(e.key).startsWith('fh3_')) return
-      hydrateFromStorage()
-    }
-
-    window.addEventListener('storage', onStorage)
-    const pollId = window.setInterval(() => {
-      if (window.storage?.get) hydrateFromStorage()
-    }, 3000)
-
-    return () => {
-      window.removeEventListener('storage', onStorage)
-      window.clearInterval(pollId)
-    }
-  }, [hydrateFromStorage])
+  useEffect(()=>{ trySet('fh3_members',  members)  }, [members])
+  useEffect(()=>{ trySet('fh3_tasks',    tasks)    }, [tasks])
+  useEffect(()=>{ trySet('fh3_messages', messages) }, [messages])
+  useEffect(()=>{ trySet('fh3_meetings', meetings) }, [meetings])
+  useEffect(()=>{ trySet('fh3_projects', projects) }, [projects])
+  useEffect(()=>{ trySet('fh3_notes',   notes)    }, [notes])
+  useEffect(()=>{ trySet('fh3_files',   files)    }, [files])
+  useEffect(()=>{ trySet('fh3_dark',    dark)     }, [dark])
 
   // ── CSS injection ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (typeof document === 'undefined') return
+  useEffect(()=>{
     let el = document.getElementById('fh3css')
-    if (!el) {
-      el = document.createElement('style')
-      el.id = 'fh3css'
-      document.head.appendChild(el)
-    }
+    if (!el) { el = document.createElement('style'); el.id='fh3css'; document.head.appendChild(el) }
     el.textContent = mkCSS(dark)
   }, [dark])
 
-  // ── Online / break timers ──────────────────────────────────────────────────
-  useEffect(() => {
-    setActiveTimer(onBreak ? 'break' : 'online')
-  }, [onBreak])
-
-  useEffect(() => {
+  // ── Online timer ───────────────────────────────────────────────────────────
+  useEffect(()=>{
     if (!user) return
     clearInterval(timerRef.current)
-    timerRef.current = setInterval(() => {
-      if (onBreak) {
-        setBreakTime(t => t + 1)
-        setActiveTimer('break')
-      } else {
-        setOnlineTime(t => t + 1)
-        setActiveTimer('online')
-      }
+    timerRef.current = setInterval(()=>{
+      setOnBreak(ob => { if (!ob) setOnlineTime(t=>t+1); return ob })
     }, 1000)
-    return () => clearInterval(timerRef.current)
-  }, [user, onBreak])
-
-  // ── Page guard ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (page === 'admin' && user?.role !== 'admin') setPage('overview')
-  }, [page, user])
+    return ()=>clearInterval(timerRef.current)
+  }, [user])
 
   // ── onLogin ────────────────────────────────────────────────────────────────
   const onLogin = (member, newPw) => {
     if (newPw) {
-      setMembers(prev => {
-        const next = prev.map(m =>
-          m.id === member.id ? { ...m, pw: newPw, mustChangePw: false } : m
-        )
-        const fresh = next.find(m => m.id === member.id) || member
-        setUser(fresh)
-        return next
-      })
-      return
+      const updated = members.map(m =>
+        m.id === member.id ? { ...m, pw: newPw, mustChangePw: false } : m
+      )
+      setMembers(updated)
+      setUser(updated.find(m => m.id === member.id))
+    } else {
+      setUser(members.find(m => m.id === member.id) || member)
     }
-    const fresh = members.find(m => m.id === member.id) || member
-    setUser(fresh)
   }
-
-  const onLogout = () => {
-    setUser(null)
-    setPage('overview')
-    setOnBreak(false)
-    setActiveTimer('online')
-    setOnlineTime(0)
-    setBreakTime(0)
-  }
+  const onLogout = () => { setUser(null); setOnlineTime(0); setPage('overview') }
 
   // ── Task ops ───────────────────────────────────────────────────────────────
-  const addTask      = t  => setTasks(p => [...p, t])
-  const editTask     = t  => setTasks(p => p.map(x => x.id === t.id ? t : x))
-  const deleteTask   = id => setTasks(p => p.filter(t => t.id !== id))
-  const statusChange = (id, status) => setTasks(p => p.map(t => t.id === id ? { ...t, status } : t))
+  const addTask          = t  => setTasks(p=>[...p, t])
+  const editTask         = t  => setTasks(p=>p.map(x=>x.id===t.id?t:x))
+  const deleteTask       = id => setTasks(p=>p.filter(t=>t.id!==id))
+  const statusChange     = (id, status) => setTasks(p=>p.map(t=>t.id===id?{...t,status}:t))
 
   // ── Chat ops ───────────────────────────────────────────────────────────────
-  const sendMsg   = m  => setMessages(p => [...p, m])
-  const deleteMsg = id => setMessages(p => p.filter(m => m.id !== id))
+  const sendMsg          = m  => setMessages(p=>[...p, m])
+  const deleteMsg        = id => setMessages(p=>p.filter(m=>m.id!==id))
 
   // ── Meeting ops ────────────────────────────────────────────────────────────
-  const addMeeting    = m  => setMeetings(p => [...p, m])
-  const deleteMeeting = id => setMeetings(p => p.filter(m => m.id !== id))
+  const addMeeting       = m  => setMeetings(p=>[...p, m])
+  const deleteMeeting    = id => setMeetings(p=>p.filter(m=>m.id!==id))
 
   // ── Project ops ────────────────────────────────────────────────────────────
-  const addProject    = p  => setProjects(prev => [...prev, p])
-  const deleteProject = id => setProjects(p => p.filter(x => x.id !== id))
+  const addProject       = p  => setProjects(prev=>[...prev, p])
+  const deleteProject    = id => setProjects(p=>p.filter(x=>x.id!==id))
 
   // ── Member ops ─────────────────────────────────────────────────────────────
   const updateMember = (id, patch) => {
-    setMembers(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))
-    if (user?.id === id) setUser(prev => ({ ...prev, ...patch }))
+    setMembers(p=>p.map(m=>m.id===id?{...m,...patch}:m))
+    if (user?.id === id) setUser(u=>({...u,...patch}))
   }
 
   // ── File ops ───────────────────────────────────────────────────────────────
-  const uploadFile = f  => setFiles(p => [...p, f])
-  const deleteFile = id => setFiles(p => p.filter(f => f.id !== id))
-  const shareFile  = id => setFiles(p => p.map(f => f.id === id ? { ...f, shared: !f.shared } : f))
+  const uploadFile       = f  => setFiles(p=>[...p, f])
+  const deleteFile       = id => setFiles(p=>p.filter(f=>f.id!==id))
+  const shareFile        = id => setFiles(p=>p.map(f=>f.id===id?{...f,shared:!f.shared}:f))
 
   // ── Notes ──────────────────────────────────────────────────────────────────
-  const saveNote = (tab, text) => setNotes(n => ({ ...n, [tab]: text }))
+  const saveNote = (tab, text) => setNotes(n=>({...n,[tab]:text}))
 
   // ── Awards / Reset ─────────────────────────────────────────────────────────
-  const resetPoints = () => setTasks(p => p.map(t => t.status === 'done' ? { ...t, status:'todo' } : t))
+  const resetPoints = () => setTasks(p=>p.map(t=>t.status==='done'?{...t,status:'todo'}:t))
 
   // ── Shared task props ──────────────────────────────────────────────────────
   const boardProps = {
@@ -1903,29 +1849,22 @@ function App() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  if (!user) {
-    return (
-      <TC.Provider value={{ T, dark, setDark }}>
-        <Login members={members} onLogin={onLogin} dark={dark} setDark={setDark}/>
-      </TC.Provider>
-    )
-  }
+  if (!user) return (
+    <TC.Provider value={{T, dark, setDark}}>
+      <Login members={members} onLogin={onLogin} dark={dark} setDark={setDark}/>
+    </TC.Provider>
+  )
 
   return (
-    <TC.Provider value={{ T, dark, setDark }}>
+    <TC.Provider value={{T, dark, setDark}}>
       <div style={{display:'flex', height:'100vh', overflow:'hidden', background:T.bg}}>
         <Sidebar page={page} setPage={setPage} user={user} members={members}/>
         <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden', minWidth:0}}>
           <TopBar
-            page={page}
-            user={user}
-            onlineTime={activeTimer === 'break' ? breakTime : onlineTime}
-            onBreak={onBreak}
-            setOnBreak={setOnBreak}
-            dark={dark}
-            setDark={setDark}
-            onQuickAdd={addTask}
-            onLogout={onLogout}
+            page={page} user={user} onlineTime={onlineTime}
+            onBreak={onBreak} setOnBreak={setOnBreak}
+            dark={dark} setDark={setDark}
+            onQuickAdd={addTask} onLogout={onLogout}
           />
           <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden', minHeight:0}}>
             {page==='overview'   && <Overview    tasks={tasks} members={members} user={user} onlineTime={onlineTime}/>}
@@ -1940,15 +1879,9 @@ function App() {
             {page==='files'      && <FileStorage files={files} user={user} onUpload={uploadFile} onDelete={deleteFile} onShare={shareFile}/>}
             {page==='admin' && user.role==='admin' && (
               <AdminPanel
-                members={members}
-                tasks={tasks}
-                messages={messages}
-                projects={projects}
-                onDeleteTask={deleteTask}
-                onDeleteMsg={deleteMsg}
-                onDeleteProject={deleteProject}
-                onUpdateMember={updateMember}
-                onAddProject={addProject}
+                members={members} tasks={tasks} messages={messages} projects={projects}
+                onDeleteTask={deleteTask} onDeleteMsg={deleteMsg} onDeleteProject={deleteProject}
+                onUpdateMember={updateMember} onAddProject={addProject}
               />
             )}
           </div>
