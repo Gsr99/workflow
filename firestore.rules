@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // App data — open read/write.
+    // Email/password login does NOT create a Firebase Auth session, so
+    // "if request.auth != null" blocks all reads/writes for those users on refresh.
+    match /flowhub/{document=**} {
+      allow read, write: if true;
+    }
+
+    // Group canvas data (separate doc to avoid document size limit)
+    match /flowhub/canvas {
+      allow read, write: if true;
+    }
+
+    // Task notes sub-collection
+    match /flowhub/tasknotes/{document=**} {
+      allow read, write: if true;
+    }
+
+    // Email queue — anyone can queue (needed for task assignment emails),
+    // but nobody can read or modify existing mail docs.
+    match /mail/{docId} {
+      allow create: if true;
+      allow read, update, delete: if false;
+    }
+  }
+}
